@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-drivesync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-drivesync_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-drivesync_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-drivesync}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-drivesync}:${POSTGRES_PASSWORD:-drivesync_pass}@db:5432/${POSTGRES_DB:-drivesync_db}
+      PORT: 3000
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-YOUR_YOUTUBE_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      # 未設定ならフロントエンドがブラウザのホスト名から自動解決する
+      VITE_API_URL: ${VITE_API_URL:-}
+      VITE_WS_URL: ${VITE_WS_URL:-}
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  pgdata:
