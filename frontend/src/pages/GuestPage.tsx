@@ -2,7 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { useSocket } from '../hooks/useSocket';
 import { useUserIdentity } from '../hooks/useUserIdentity';
-import type { Video, WSMessage, WSServerMessage, YouTubeSearchResult } from '../types';
+import type { Video, WSMessage, WSServerMessage, YouTubeSearchResult, YouTubePlaylistInfo } from '../types';
 import { API_URL, WS_URL } from '../lib/config';
 
 // ============================================================
@@ -36,6 +36,12 @@ export default function GuestPage() {
   // URL追加関連
   const [urlError, setUrlError] = useState<string | null>(null);
   const [isAddingByUrl, setIsAddingByUrl] = useState(false);
+
+  // プレイリストインポート関連
+  const [playlistPreview, setPlaylistPreview] = useState<YouTubePlaylistInfo | null>(null);
+  const [isFetchingPlaylist, setIsFetchingPlaylist] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [playlistError, setPlaylistError] = useState<string | null>(null);
 
   // 検索フォーム ref
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -146,6 +152,26 @@ export default function GuestPage() {
     );
     if (longMatch) return longMatch[1];
 
+    return null;
+  }, []);
+
+  // ----------------------------------------------------------
+  // YouTube プレイリストURL からプレイリストIDを抽出
+  // ----------------------------------------------------------
+  const extractYouTubePlaylistId = useCallback((input: string): string | null => {
+    const trimmed = input.trim();
+    try {
+      // URLっぽい文字列ならURLSearchParamsで安全にパース
+      if (trimmed.includes('youtube.com') || trimmed.includes('youtu.be')) {
+        const url = new URL(
+          trimmed.startsWith('http') ? trimmed : `https://${trimmed}`,
+        );
+        const listId = url.searchParams.get('list');
+        if (listId && listId.startsWith('PL')) return listId;
+      }
+    } catch {
+      // URL パース失敗 → プレイリストではない
+    }
     return null;
   }, []);
 
@@ -279,11 +305,101 @@ export default function GuestPage() {
   );
 
   // ----------------------------------------------------------
+  // プレイリスト情報を取得してプレビュー表示
+  // ----------------------------------------------------------
+  const handleFetchPlaylist = useCallback(
+    async (playlistId: string) => {
+      setIsFetchingPlaylist(true);
+      setPlaylistError(null);
+      setPlaylistPreview(null);
+
+      try {
+        const res = await fetch(
+          `${API_URL}/api/youtube/playlist?id=${encodeURIComponent(playlistId)}`,
+        );
+        if (!res.ok) {
+          throw new Error(`プレイリストの取得に失敗しました (${res.status})`);
+        }
+        const data = (await res.json()) as YouTubePlaylistInfo;
+        if (!data.videos || data.videos.length === 0) {
+          throw new Error('プレイリストに動画がありません');
+        }
+        setPlaylistPreview(data);
+        setSearchQuery('');
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'プレイリストの取得に失敗しました';
+        setPlaylistError(message);
+        console.error('[GuestPage] Playlist fetch error:', err);
+      } finally {
+        setIsFetchingPlaylist(false);
+      }
+    },
+    [],
+  );
+
+  // ----------------------------------------------------------
+  // プレイリスト一括追加
+  // ----------------------------------------------------------
+  const handleImportPlaylist = useCallback(() => {
+    if (!roomId || !playlistPreview) return;
+
+    // 追加済みを除外
+    const newVideos = playlistPreview.videos.filter(
+      (v) => !playlist.some((pv) => pv.youtubeId === v.youtubeId),
+    );
+    if (newVideos.length === 0) {
+      setPlaylistPreview(null);
+      return;
+    }
+
+    setIsImporting(true);
+
+    // 楽観的UI: ローカルプレイリストに即座に反映
+    const optimisticVideos = newVideos.map((v, i) => ({
+      id: `optimistic-pl-${v.youtubeId}`,
+      youtubeId: v.youtubeId,
+      title: v.title,
+      thumbnail: v.thumbnail,
+      addedBy: userId,
+      isPlayed: false,
+      order: playlist.length + i,
+    }));
+    setPlaylist((prev) => [...prev, ...optimisticVideos]);
+    setOptimisticIds((prev) => {
+      const next = new Set(prev);
+      for (const v of newVideos) next.add(v.youtubeId);
+      return next;
+    });
+
+    // WebSocket で一括送信
+    send({
+      type: 'ADD_VIDEOS',
+      roomId,
+      videos: newVideos.map((v) => ({
+        youtubeId: v.youtubeId,
+        title: v.title,
+        thumbnail: v.thumbnail,
+      })),
+      userId,
+    });
+
+    setPlaylistPreview(null);
+    setIsImporting(false);
+  }, [roomId, playlistPreview, playlist, userId, send]);
+
+  // ----------------------------------------------------------
   // フォーム送信（URL検出時は追加、それ以外は検索）
   // ----------------------------------------------------------
   const handleSearchSubmit = useCallback(
     (e: React.FormEvent) => {
       e.preventDefault();
+      // プレイリストURLを動画URLより先にチェック
+      const playlistId = extractYouTubePlaylistId(searchQuery);
+      if (playlistId) {
+        handleFetchPlaylist(playlistId);
+        return;
+      }
       const videoId = extractYouTubeVideoId(searchQuery);
       if (videoId) {
         handleAddByUrl(videoId);
@@ -291,7 +407,7 @@ export default function GuestPage() {
         handleSearch();
       }
     },
-    [searchQuery, extractYouTubeVideoId, handleAddByUrl, handleSearch],
+    [searchQuery, extractYouTubePlaylistId, extractYouTubeVideoId, handleFetchPlaylist, handleAddByUrl, handleSearch],
   );
 
   // ----------------------------------------------------------
@@ -516,15 +632,15 @@ export default function GuestPage() {
                 setSearchQuery(e.target.value);
                 setUrlError(null);
               }}
-              placeholder="検索 or YouTube URLを貼り付け"
+              placeholder="検索 / 動画URL / プレイリストURL"
               className="flex-1 rounded-lg bg-slate-800 px-4 py-3 text-sm text-white placeholder-slate-500 outline-none ring-1 ring-slate-700 transition-colors focus:ring-emerald-500"
             />
             <button
               type="submit"
-              disabled={isSearching || isAddingByUrl || !searchQuery.trim()}
+              disabled={isSearching || isAddingByUrl || isFetchingPlaylist || !searchQuery.trim()}
               className="flex-shrink-0 rounded-lg bg-emerald-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-emerald-500 active:bg-emerald-700 disabled:bg-slate-700 disabled:text-slate-500"
             >
-              {isSearching || isAddingByUrl ? (
+              {isSearching || isAddingByUrl || isFetchingPlaylist ? (
                 <svg
                   className="h-5 w-5 animate-spin"
                   xmlns="http://www.w3.org/2000/svg"
@@ -545,6 +661,8 @@ export default function GuestPage() {
                     d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
                   />
                 </svg>
+              ) : extractYouTubePlaylistId(searchQuery) ? (
+                'インポート'
               ) : extractYouTubeVideoId(searchQuery) ? (
                 '追加'
               ) : (
@@ -554,7 +672,12 @@ export default function GuestPage() {
           </form>
 
           {/* URL検出ヒント */}
-          {searchQuery.trim() && extractYouTubeVideoId(searchQuery) && (
+          {searchQuery.trim() && extractYouTubePlaylistId(searchQuery) && (
+            <p className="mt-1.5 text-xs text-emerald-400">
+              プレイリストURLを検出しました - 「インポート」で一括追加します
+            </p>
+          )}
+          {searchQuery.trim() && !extractYouTubePlaylistId(searchQuery) && extractYouTubeVideoId(searchQuery) && (
             <p className="mt-1.5 text-xs text-emerald-400">
               YouTube URLを検出しました - 「追加」で直接プレイリストに追加します
             </p>
@@ -573,7 +696,103 @@ export default function GuestPage() {
               {urlError}
             </div>
           )}
+
+          {/* プレイリストエラー */}
+          {playlistError && (
+            <div className="mt-2 rounded-lg bg-red-900/50 px-3 py-2 text-sm text-red-300">
+              {playlistError}
+            </div>
+          )}
         </section>
+
+        {/* ========== プレイリスト インポート プレビュー ========== */}
+        {playlistPreview && (
+          <section className="mt-4 rounded-xl bg-slate-800 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="min-w-0 flex-1">
+                <h3 className="truncate text-sm font-semibold text-white">
+                  {playlistPreview.title}
+                </h3>
+                <p className="text-xs text-slate-400">
+                  {playlistPreview.videos.length}曲
+                  {(() => {
+                    const newCount = playlistPreview.videos.filter(
+                      (v) => !playlist.some((pv) => pv.youtubeId === v.youtubeId),
+                    ).length;
+                    const dupCount = playlistPreview.videos.length - newCount;
+                    return dupCount > 0 ? ` (${dupCount}曲は追加済み)` : '';
+                  })()}
+                </p>
+              </div>
+            </div>
+
+            {/* 動画リスト（スクロール可能） */}
+            <ul className="max-h-64 space-y-1.5 overflow-y-auto">
+              {playlistPreview.videos.map((v, i) => {
+                const alreadyAdded = playlist.some(
+                  (pv) => pv.youtubeId === v.youtubeId,
+                );
+                return (
+                  <li
+                    key={v.youtubeId}
+                    className={`flex items-center gap-2 rounded-lg p-2 ${
+                      alreadyAdded ? 'opacity-40' : ''
+                    }`}
+                  >
+                    <span className="w-6 flex-shrink-0 text-center text-xs text-slate-500">
+                      {i + 1}
+                    </span>
+                    <img
+                      src={v.thumbnail}
+                      alt={v.title}
+                      className="h-8 w-12 flex-shrink-0 rounded object-cover"
+                    />
+                    <p className="min-w-0 flex-1 truncate text-xs text-white">
+                      {v.title}
+                    </p>
+                    {alreadyAdded && (
+                      <span className="flex-shrink-0 text-xs text-slate-500">
+                        追加済み
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+
+            {/* アクションボタン */}
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPlaylistPreview(null)}
+                className="flex-1 rounded-lg bg-slate-700 px-4 py-2.5 text-sm font-medium text-slate-300 transition-colors hover:bg-slate-600"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={handleImportPlaylist}
+                disabled={
+                  isImporting ||
+                  connectionState !== 'connected' ||
+                  playlistPreview.videos.filter(
+                    (v) => !playlist.some((pv) => pv.youtubeId === v.youtubeId),
+                  ).length === 0
+                }
+                className="flex-1 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-emerald-500 active:bg-emerald-700 disabled:bg-slate-700 disabled:text-slate-500"
+              >
+                {(() => {
+                  const newCount = playlistPreview.videos.filter(
+                    (v) => !playlist.some((pv) => pv.youtubeId === v.youtubeId),
+                  ).length;
+                  return newCount > 0
+                    ? `${newCount}曲を追加`
+                    : 'すべて追加済み';
+                })()}
+              </button>
+            </div>
+          </section>
+        )}
 
         {/* ========== 検索結果 ========== */}
         {searchResults.length > 0 && (

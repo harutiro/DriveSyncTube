@@ -43,6 +43,12 @@ export type WSMessage =
   | { type: 'NEXT_VIDEO'; roomId: string }
   | { type: 'REMOVE_VIDEO'; roomId: string; videoId: string }
   | { type: 'SELECT_VIDEO'; roomId: string; youtubeId: string }
+  | {
+      type: 'ADD_VIDEOS';
+      roomId: string;
+      videos: Array<{ youtubeId: string; title: string; thumbnail: string }>;
+      userId: string;
+    }
   | { type: 'PING' };
 
 // ------------------------------------------------------------
@@ -63,4 +69,12 @@ export interface YouTubeSearchResult {
   youtubeId: string;
   title: string;
   thumbnail: string;
+}
+
+/** YouTubeプレイリスト情報 (REST API レスポンス) */
+export interface YouTubePlaylistInfo {
+  playlistId: string;
+  title: string;
+  videoCount: number;
+  videos: Array<{ youtubeId: string; title: string; thumbnail: string }>;
 }

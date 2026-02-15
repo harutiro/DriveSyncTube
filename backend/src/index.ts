@@ -222,6 +222,75 @@ app.get("/api/youtube/video", async (c) => {
   }
 });
 
+/**
+ * GET /api/youtube/playlist?id=PLAYLIST_ID
+ * Invidious API 経由でプレイリスト情報と動画一覧を取得（ページネーション対応、最大1000件）。
+ */
+app.get("/api/youtube/playlist", async (c) => {
+  const playlistId = c.req.query("id");
+  if (!playlistId) {
+    return c.json({ error: "Query parameter 'id' is required" }, 400);
+  }
+
+  try {
+    const allVideos: Array<{ youtubeId: string; title: string; thumbnail: string }> = [];
+    let playlistTitle = "";
+    let totalVideoCount = 0;
+    const MAX_PAGES = 10;
+
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const params = new URLSearchParams({ page: String(page) });
+      const res = await invidiousFetch(
+        `/api/v1/playlists/${encodeURIComponent(playlistId)}?${params}`
+      );
+      const data: {
+        title: string;
+        videoCount: number;
+        videos: Array<{
+          videoId: string;
+          title: string;
+          videoThumbnails: Array<{ quality: string; url: string }>;
+        }>;
+      } = await res.json();
+
+      if (page === 1) {
+        playlistTitle = data.title;
+        totalVideoCount = data.videoCount;
+      }
+
+      if (!data.videos || data.videos.length === 0) break;
+
+      for (const v of data.videos) {
+        // 削除済み・非公開動画はスキップ
+        if (!v.videoId || !v.title) continue;
+
+        const thumb =
+          v.videoThumbnails?.find((t) => t.quality === "medium")?.url ??
+          v.videoThumbnails?.[0]?.url ??
+          `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`;
+        allVideos.push({
+          youtubeId: v.videoId,
+          title: v.title,
+          thumbnail: thumb,
+        });
+      }
+
+      // Invidious returns ~100 per page; stop if we got them all
+      if (allVideos.length >= totalVideoCount) break;
+    }
+
+    return c.json({
+      playlistId,
+      title: playlistTitle,
+      videoCount: totalVideoCount,
+      videos: allVideos,
+    });
+  } catch (err) {
+    console.error("[api] YouTube playlist fetch error:", err);
+    return c.json({ error: "Failed to fetch playlist" }, 500);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // WebSocket endpoint
 // ---------------------------------------------------------------------------

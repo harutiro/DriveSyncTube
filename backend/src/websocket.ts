@@ -36,6 +36,12 @@ type IncomingMessage =
   | { type: "NEXT_VIDEO"; roomId: string }
   | { type: "REMOVE_VIDEO"; roomId: string; videoId: string }
   | { type: "SELECT_VIDEO"; roomId: string; youtubeId: string }
+  | {
+      type: "ADD_VIDEOS";
+      roomId: string;
+      videos: Array<{ youtubeId: string; title: string; thumbnail: string }>;
+      userId: string;
+    }
   | { type: "PING" };
 
 // ---------------------------------------------------------------------------
@@ -288,6 +294,75 @@ export async function handleMessage(
         }
 
         // Broadcast updated playlist to everyone
+        const playlist = await getPlaylist(room.id);
+        broadcastAll(roomId, { type: "PLAYLIST_UPDATE", playlist });
+        break;
+      }
+
+      // ---------------------------------------------------------------
+      // ADD_VIDEOS (プレイリスト一括追加)
+      // ---------------------------------------------------------------
+      case "ADD_VIDEOS": {
+        const { roomId, videos, userId } = msg;
+
+        if (!videos || videos.length === 0) {
+          send(ws, { type: "ERROR", message: "No videos provided" });
+          return;
+        }
+        if (videos.length > 200) {
+          send(ws, { type: "ERROR", message: "Maximum 200 videos per import" });
+          return;
+        }
+
+        const room = await prisma.room.findUnique({
+          where: { code: roomId },
+        });
+        if (!room) {
+          send(ws, { type: "ERROR", message: "Room not found" });
+          return;
+        }
+
+        // 既にルームに存在する youtubeId を取得（重複防止）
+        const existing = await prisma.video.findMany({
+          where: { roomId: room.id },
+          select: { youtubeId: true, order: true },
+          orderBy: { order: "desc" },
+        });
+        const existingIds = new Set(existing.map((v) => v.youtubeId));
+        const maxOrder = existing.length > 0 ? existing[0].order : -1;
+
+        // 不正なエントリと重複を除外して新規のみ追加
+        const newVideos = videos.filter(
+          (v) => v.youtubeId && v.title && !existingIds.has(v.youtubeId),
+        );
+        if (newVideos.length > 0) {
+          await prisma.video.createMany({
+            data: newVideos.map((v, i) => ({
+              youtubeId: v.youtubeId,
+              title: v.title,
+              thumbnail: v.thumbnail,
+              addedBy: userId,
+              order: maxOrder + 1 + i,
+              roomId: room.id,
+            })),
+          });
+        }
+
+        // プレイリストが空だった場合、最初の動画を自動再生
+        const state = roomStates.get(roomId);
+        if (state && !state.currentVideoId && newVideos.length > 0) {
+          state.currentVideoId = newVideos[0].youtubeId;
+          state.isPlaying = true;
+          state.currentTime = 0;
+          await persistRoomState(roomId);
+
+          broadcastAll(roomId, {
+            type: "PLAY_VIDEO",
+            videoId: newVideos[0].youtubeId,
+          });
+        }
+
+        // 更新後のプレイリストをブロードキャスト
         const playlist = await getPlaylist(room.id);
         broadcastAll(roomId, { type: "PLAYLIST_UPDATE", playlist });
         break;
