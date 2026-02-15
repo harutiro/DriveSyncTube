@@ -81,9 +81,44 @@ app.get("/api/rooms/:code", async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Invidious API helper (APIキー不要)
+// ---------------------------------------------------------------------------
+
+const INVIDIOUS_INSTANCES = [
+  "https://inv.vern.cc",
+  "https://invidious.f5.si",
+  "https://invidious.reallyaweso.me",
+  "https://invidious.materialio.us",
+];
+
+/**
+ * 複数の Invidious インスタンスにフォールバックしながら fetch する。
+ */
+async function invidiousFetch(path: string): Promise<Response> {
+  const instances = process.env.INVIDIOUS_INSTANCES
+    ? process.env.INVIDIOUS_INSTANCES.split(",").map((s) => s.trim())
+    : INVIDIOUS_INSTANCES;
+
+  let lastError: unknown;
+  for (const base of instances) {
+    try {
+      const res = await fetch(`${base}${path}`, {
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) return res;
+      console.warn(`[invidious] ${base} returned ${res.status}`);
+    } catch (err) {
+      console.warn(`[invidious] ${base} failed:`, err);
+      lastError = err;
+    }
+  }
+  throw lastError ?? new Error("All Invidious instances failed");
+}
+
 /**
  * GET /api/youtube/search?q=query
- * Proxy search to YouTube Data API v3.
+ * Invidious API 経由で動画検索 (APIキー不要)。
  */
 app.get("/api/youtube/search", async (c) => {
   const query = c.req.query("q");
@@ -91,55 +126,32 @@ app.get("/api/youtube/search", async (c) => {
     return c.json({ error: "Query parameter 'q' is required" }, 400);
   }
 
-  const apiKey = process.env.YOUTUBE_API_KEY;
-  if (!apiKey) {
-    console.error("[api] YOUTUBE_API_KEY is not set");
-    return c.json({ error: "YouTube API key is not configured" }, 500);
-  }
-
   try {
-    const url = new URL("https://www.googleapis.com/youtube/v3/search");
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("type", "video");
-    url.searchParams.set("maxResults", "10");
-    url.searchParams.set("q", query);
-    url.searchParams.set("key", apiKey);
+    const params = new URLSearchParams({
+      q: query,
+      type: "video",
+    });
+    const res = await invidiousFetch(`/api/v1/search?${params}`);
+    const data: Array<{
+      type: string;
+      videoId: string;
+      title: string;
+      author: string;
+      videoThumbnails: Array<{ quality: string; url: string }>;
+    }> = await res.json();
 
-    const response = await fetch(url.toString());
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error(
-        `[api] YouTube API error (${response.status}):`,
-        errorBody
-      );
-      return c.json(
-        { error: "YouTube API request failed", status: response.status },
-        502
-      );
-    }
-
-    const data = await response.json();
-
-    // Transform into a simpler shape for the frontend
-    const results = (data.items ?? []).map(
-      (item: {
-        id: { videoId: string };
-        snippet: {
-          title: string;
-          thumbnails: { medium?: { url: string }; default?: { url: string } };
-          channelTitle: string;
-        };
-      }) => ({
-        youtubeId: item.id.videoId,
-        title: item.snippet.title,
+    const results = data
+      .filter((item) => item.type === "video")
+      .slice(0, 10)
+      .map((item) => ({
+        youtubeId: item.videoId,
+        title: item.title,
         thumbnail:
-          item.snippet.thumbnails.medium?.url ??
-          item.snippet.thumbnails.default?.url ??
+          item.videoThumbnails?.find((t) => t.quality === "medium")?.url ??
+          item.videoThumbnails?.[0]?.url ??
           "",
-        channelTitle: item.snippet.channelTitle,
-      })
-    );
+        channelTitle: item.author,
+      }));
 
     return c.json({ results });
   } catch (err) {
@@ -149,8 +161,25 @@ app.get("/api/youtube/search", async (c) => {
 });
 
 /**
+ * YouTube oEmbed API フォールバック (Invidious /videos/ が不安定なため)
+ */
+async function fetchViaOEmbed(videoId: string) {
+  const url = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&format=json`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`oEmbed returned ${res.status}`);
+  const data: { title: string; author_name: string; thumbnail_url: string } =
+    await res.json();
+  return {
+    youtubeId: videoId,
+    title: data.title,
+    thumbnail: data.thumbnail_url,
+    channelTitle: data.author_name,
+  };
+}
+
+/**
  * GET /api/youtube/video?id=VIDEO_ID
- * Fetch video details by YouTube video ID.
+ * Invidious API 経由で動画情報を取得。失敗時は YouTube oEmbed にフォールバック。
  */
 app.get("/api/youtube/video", async (c) => {
   const videoId = c.req.query("id");
@@ -158,52 +187,37 @@ app.get("/api/youtube/video", async (c) => {
     return c.json({ error: "Query parameter 'id' is required" }, 400);
   }
 
-  const apiKey = process.env.YOUTUBE_API_KEY;
-  if (!apiKey) {
-    console.error("[api] YOUTUBE_API_KEY is not set");
-    return c.json({ error: "YouTube API key is not configured" }, 500);
-  }
-
+  // 1) Invidious を試す
   try {
-    const url = new URL("https://www.googleapis.com/youtube/v3/videos");
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("id", videoId);
-    url.searchParams.set("key", apiKey);
+    const res = await invidiousFetch(`/api/v1/videos/${encodeURIComponent(videoId)}`);
+    const item: {
+      videoId: string;
+      title: string;
+      author: string;
+      videoThumbnails: Array<{ quality: string; url: string }>;
+    } = await res.json();
 
-    const response = await fetch(url.toString());
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error(
-        `[api] YouTube API error (${response.status}):`,
-        errorBody
-      );
-      return c.json(
-        { error: "YouTube API request failed", status: response.status },
-        502
-      );
-    }
-
-    const data = await response.json();
-
-    if (!data.items || data.items.length === 0) {
-      return c.json({ error: "Video not found" }, 404);
-    }
-
-    const item = data.items[0];
     const result = {
-      youtubeId: item.id,
-      title: item.snippet.title,
+      youtubeId: item.videoId,
+      title: item.title,
       thumbnail:
-        item.snippet.thumbnails.medium?.url ??
-        item.snippet.thumbnails.default?.url ??
+        item.videoThumbnails?.find((t) => t.quality === "medium")?.url ??
+        item.videoThumbnails?.[0]?.url ??
         "",
-      channelTitle: item.snippet.channelTitle,
+      channelTitle: item.author,
     };
 
     return c.json({ result });
+  } catch (invidiousErr) {
+    console.warn("[api] Invidious video fetch failed, trying oEmbed fallback:", invidiousErr);
+  }
+
+  // 2) oEmbed フォールバック
+  try {
+    const result = await fetchViaOEmbed(videoId);
+    return c.json({ result });
   } catch (err) {
-    console.error("[api] YouTube video fetch error:", err);
+    console.error("[api] YouTube video fetch error (all methods failed):", err);
     return c.json({ error: "Failed to fetch video info" }, 500);
   }
 });
