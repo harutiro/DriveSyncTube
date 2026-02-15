@@ -15,6 +15,7 @@ interface RoomState {
   currentVideoId: string | null;
   isPlaying: boolean;
   currentTime: number;
+  duration: number;
 }
 
 type IncomingMessage =
@@ -32,8 +33,11 @@ type IncomingMessage =
       roomId: string;
       currentTime: number;
       isPlaying: boolean;
+      duration?: number;
     }
   | { type: "NEXT_VIDEO"; roomId: string }
+  | { type: "PREV_VIDEO"; roomId: string }
+  | { type: "SEEK"; roomId: string; seekTime: number }
   | { type: "REMOVE_VIDEO"; roomId: string; videoId: string }
   | { type: "SELECT_VIDEO"; roomId: string; youtubeId: string }
   | {
@@ -132,6 +136,7 @@ async function buildSyncState(roomCode: string) {
     currentVideoId: null,
     isPlaying: false,
     currentTime: 0,
+    duration: 0,
   };
   const roomDbId = await resolveRoomId(roomCode);
   const playlist = roomDbId ? await getPlaylist(roomDbId) : [];
@@ -223,6 +228,7 @@ export async function handleMessage(
             currentVideoId: room.currentVideoId,
             isPlaying: room.isPlaying,
             currentTime: room.currentTime,
+            duration: 0,
           });
         }
 
@@ -406,7 +412,8 @@ export async function handleMessage(
       // SYNC_TIME  (sent periodically by the host)
       // ---------------------------------------------------------------
       case "SYNC_TIME": {
-        const { roomId, currentTime, isPlaying } = msg;
+        const { roomId, currentTime, isPlaying, duration: msgDuration } = msg;
+        const duration = msgDuration ?? 0;
         const state = roomStates.get(roomId);
 
         // PLAY/PAUSE コマンド直後はホストの isPlaying 報告を無視し、
@@ -416,6 +423,9 @@ export async function handleMessage(
 
         if (state) {
           state.currentTime = currentTime;
+          if (duration > 0) {
+            state.duration = duration;
+          }
           if (!inCooldown) {
             state.isPlaying = isPlaying;
           }
@@ -438,6 +448,7 @@ export async function handleMessage(
             type: "SYNC_TIME",
             currentTime: state?.currentTime ?? currentTime,
             isPlaying: state?.isPlaying ?? isPlaying,
+            duration: state?.duration ?? duration,
           },
           ws
         );
@@ -495,6 +506,81 @@ export async function handleMessage(
         // Broadcast updated playlist
         const playlist = await getPlaylist(room.id);
         broadcastAll(roomId, { type: "PLAYLIST_UPDATE", playlist });
+        break;
+      }
+
+      // ---------------------------------------------------------------
+      // PREV_VIDEO
+      // ---------------------------------------------------------------
+      case "PREV_VIDEO": {
+        const { roomId } = msg;
+
+        const room = await prisma.room.findUnique({
+          where: { code: roomId },
+        });
+        if (!room) return;
+
+        const state = roomStates.get(roomId);
+
+        // リスト全体を順番に取得
+        const allVideos = await prisma.video.findMany({
+          where: { roomId: room.id },
+          orderBy: { order: "asc" },
+        });
+
+        // 現在の動画のインデックスを探し、その前を再生
+        const currentIndex = allVideos.findIndex(
+          (v) => v.youtubeId === state?.currentVideoId
+        );
+        const prevVideo = allVideos[currentIndex - 1] ?? null;
+
+        if (prevVideo && state) {
+          state.currentVideoId = prevVideo.youtubeId;
+          state.isPlaying = true;
+          state.currentTime = 0;
+          await persistRoomState(roomId);
+
+          broadcastAll(roomId, {
+            type: "PLAY_VIDEO",
+            videoId: prevVideo.youtubeId,
+          });
+        } else if (state) {
+          // 先頭の場合は同じ曲を最初から再生
+          state.currentTime = 0;
+          state.isPlaying = true;
+          await persistRoomState(roomId);
+
+          broadcastAll(roomId, {
+            type: "SEEK",
+            seekTime: 0,
+          });
+          broadcastAll(roomId, {
+            type: "PLAY",
+            videoId: state.currentVideoId,
+            currentTime: 0,
+          });
+        }
+
+        // Broadcast updated playlist
+        const playlist = await getPlaylist(room.id);
+        broadcastAll(roomId, { type: "PLAYLIST_UPDATE", playlist });
+        break;
+      }
+
+      // ---------------------------------------------------------------
+      // SEEK
+      // ---------------------------------------------------------------
+      case "SEEK": {
+        const { roomId, seekTime } = msg;
+        const state = roomStates.get(roomId);
+        if (state) {
+          state.currentTime = seekTime;
+        }
+
+        broadcastAll(roomId, {
+          type: "SEEK",
+          seekTime,
+        });
         break;
       }
 

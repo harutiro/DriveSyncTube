@@ -165,6 +165,7 @@ export default function HostPage() {
 
       try {
         const currentTime = player.getCurrentTime();
+        const duration = player.getDuration();
         const state = player.getPlayerState();
         const playing = state === window.YT.PlayerState.PLAYING;
 
@@ -173,6 +174,7 @@ export default function HostPage() {
           roomId: roomId!,
           currentTime,
           isPlaying: playing,
+          duration,
         });
       } catch (err) {
         console.error('[HostPage] SYNC_TIME send error:', err);
@@ -302,6 +304,20 @@ export default function HostPage() {
           // プレイヤー未初期化 → ready 後に再生するよう保持
           pendingVideoRef.current = msg.videoId;
           pendingSeekRef.current = 0;
+        }
+        break;
+      }
+
+      // ---- シーク ----
+      case 'SEEK': {
+        console.log('[HostPage] SEEK received:', msg.seekTime);
+        const player = playerRef.current;
+        if (player && playerInitializedRef.current) {
+          externalActionRef.current = true;
+          player.seekTo(msg.seekTime, true);
+          setTimeout(() => {
+            externalActionRef.current = false;
+          }, 300);
         }
         break;
       }

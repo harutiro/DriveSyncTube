@@ -19,6 +19,9 @@ export default function GuestPage() {
   const [currentVideoId, setCurrentVideoId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekValue, setSeekValue] = useState(0);
 
   // 検索関連
   const [searchQuery, setSearchQuery] = useState('');
@@ -45,6 +48,9 @@ export default function GuestPage() {
 
   // 検索フォーム ref
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // シーク中フラグの ref（useCallback 内から最新値を参照するため）
+  const isSeekingRef = useRef(false);
 
   // send 関数の ref（handleConnect から最新の send を参照するため）
   const sendRef = useRef<(message: WSMessage) => void>(() => {});
@@ -81,8 +87,17 @@ export default function GuestPage() {
         break;
 
       case 'SYNC_TIME':
-        setCurrentTime(message.currentTime);
+        if (!isSeekingRef.current) {
+          setCurrentTime(message.currentTime);
+        }
         setIsPlaying(message.isPlaying);
+        if (message.duration > 0) {
+          setDuration(message.duration);
+        }
+        break;
+
+      case 'SEEK':
+        setCurrentTime(message.seekTime);
         break;
 
       case 'ERROR':
@@ -440,6 +455,28 @@ export default function GuestPage() {
     send({ type: 'NEXT_VIDEO', roomId });
   }, [roomId, send]);
 
+  const handlePrevVideo = useCallback(() => {
+    if (!roomId) return;
+    send({ type: 'PREV_VIDEO', roomId });
+  }, [roomId, send]);
+
+  const handleSeekStart = useCallback(() => {
+    setIsSeeking(true);
+    isSeekingRef.current = true;
+  }, []);
+
+  const handleSeekChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setSeekValue(Number(e.target.value));
+  }, []);
+
+  const handleSeekEnd = useCallback(() => {
+    if (!roomId) return;
+    send({ type: 'SEEK', roomId, seekTime: seekValue });
+    setCurrentTime(seekValue);
+    setIsSeeking(false);
+    isSeekingRef.current = false;
+  }, [roomId, seekValue, send]);
+
   const handleSelectVideo = useCallback(
     (youtubeId: string) => {
       if (!roomId) return;
@@ -561,8 +598,50 @@ export default function GuestPage() {
             </p>
           )}
 
+          {/* シークバー */}
+          {currentVideo && (
+            <div className="mt-3">
+              <input
+                type="range"
+                min={0}
+                max={duration || 1}
+                value={isSeeking ? seekValue : currentTime}
+                step={1}
+                onMouseDown={handleSeekStart}
+                onTouchStart={handleSeekStart}
+                onChange={handleSeekChange}
+                onMouseUp={handleSeekEnd}
+                onTouchEnd={handleSeekEnd}
+                disabled={connectionState !== 'connected'}
+                className="w-full accent-emerald-500"
+              />
+              <div className="flex justify-between text-xs text-slate-400">
+                <span>{formatTime(isSeeking ? seekValue : currentTime)}</span>
+                <span>{formatTime(duration)}</span>
+              </div>
+            </div>
+          )}
+
           {/* 再生コントロールボタン */}
           <div className="mt-3 flex items-center justify-center gap-4">
+            <button
+              type="button"
+              onClick={handlePrevVideo}
+              disabled={connectionState !== 'connected'}
+              className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-700 text-white transition-colors hover:bg-slate-600 active:bg-slate-800 disabled:text-slate-500"
+              aria-label="前の曲"
+            >
+              {/* Prev icon (mirrored next) */}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                className="h-6 w-6"
+              >
+                <path d="M18.945 7.06c1.25-.713 2.805.19 2.805 1.63v6.622c0 1.44-1.555 2.342-2.805 1.628L12 13.471v3.839c0 1.44-1.555 2.342-2.805 1.628L2.087 14.877c-1.26-.72-1.26-2.536 0-3.256l7.108-4.061C10.445 6.346 12 7.249 12 8.689v3.839l6.945-5.468Z" />
+              </svg>
+            </button>
+
             <button
               type="button"
               onClick={handlePlayPause}

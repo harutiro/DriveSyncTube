@@ -39,8 +39,11 @@ export type WSMessage =
       roomId: string;
       currentTime: number;
       isPlaying: boolean;
+      duration?: number;
     }
   | { type: 'NEXT_VIDEO'; roomId: string }
+  | { type: 'PREV_VIDEO'; roomId: string }
+  | { type: 'SEEK'; roomId: string; seekTime: number }
   | { type: 'REMOVE_VIDEO'; roomId: string; videoId: string }
   | { type: 'SELECT_VIDEO'; roomId: string; youtubeId: string }
   | {
@@ -59,7 +62,8 @@ export type WSServerMessage =
   | { type: 'PLAYLIST_UPDATE'; playlist: Video[] }
   | { type: 'PLAY'; videoId: string | null; currentTime: number }
   | { type: 'PAUSE' }
-  | { type: 'SYNC_TIME'; currentTime: number; isPlaying: boolean }
+  | { type: 'SYNC_TIME'; currentTime: number; isPlaying: boolean; duration: number }
+  | { type: 'SEEK'; seekTime: number }
   | { type: 'PLAY_VIDEO'; videoId: string | null }
   | { type: 'PONG' }
   | { type: 'ERROR'; message: string };
